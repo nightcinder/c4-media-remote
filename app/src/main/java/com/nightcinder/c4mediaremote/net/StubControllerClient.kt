@@ -28,7 +28,7 @@ class StubControllerClient(
     override suspend fun volumeUp() = stub("volume_up")
     override suspend fun volumeDown() = stub("volume_down")
     override suspend fun volumeSet(level: Int) = stub("volume_set", "?level=${level.coerceIn(0, 100)}")
-    override suspend fun setActiveRoom(room: Room) = stub("set_room", "?room=${room.name.lowercase()}")
+    override suspend fun setActiveRoom(room: Room) = stub("set_active_room", "?room=${room.name.lowercase()}")
 
     override suspend fun status(): Result<String> {
         Log.i(TAG, "STUB GET $baseUrl/v1/status")
