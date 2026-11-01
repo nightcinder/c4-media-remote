@@ -56,6 +56,8 @@ class MediaRemoteService : Service() {
     /** Volume ops queued or being sent; while non-zero, polled volume does not overwrite the local value. */
     private val pendingVolumeOps = AtomicInteger(0)
     @Volatile private var connectionError: String? = null
+    /** Last known play state; drives the MediaSession PlaybackState so the UI offers the right button. */
+    @Volatile private var playing = true
 
     private val volumeOps = Channel<VolumeOp>(Channel.UNLIMITED)
 
@@ -77,8 +79,8 @@ class MediaRemoteService : Service() {
     }
 
     private val sessionCallback = object : MediaSessionCompat.Callback() {
-        override fun onPlay() = dispatch("play") { it.play() }
-        override fun onPause() = dispatch("pause") { it.pause() }
+        override fun onPlay() = transport("play", { it.play() }) { playing = true }
+        override fun onPause() = transport("pause", { it.pause() }) { playing = false }
         override fun onSkipToNext() = dispatch("next") { it.next() }
         override fun onSkipToPrevious() = dispatch("prev") { it.prev() }
 
@@ -166,6 +168,26 @@ class MediaRemoteService : Service() {
         scope.launch {
             report(name, guarded { block(buildClient()) })
         }
+    }
+
+    /** Like [dispatch], but on success updates the play state and republishes the PlaybackState. */
+    private fun transport(
+        name: String,
+        block: suspend (ControllerClient) -> Result<Unit>,
+        onSuccess: () -> Unit,
+    ) {
+        scope.launch {
+            val result = guarded { block(buildClient()) }
+            result.onSuccess {
+                onSuccess()
+                updatePlaybackState()
+            }
+            report(name, result)
+        }
+    }
+
+    private fun updatePlaybackState() {
+        session.setPlaybackState(buildPlaybackState())
     }
 
     /**
@@ -296,6 +318,7 @@ class MediaRemoteService : Service() {
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, sourceName ?: "Control4")
                 .build(),
         )
+        updatePlaybackState()
     }
 
     private fun refreshNotification() {
@@ -326,7 +349,11 @@ class MediaRemoteService : Service() {
                     ACTION_LOCK_ROOM, "Lock room", android.R.drawable.ic_lock_idle_lock,
                 ).build(),
             )
-            .setState(PlaybackStateCompat.STATE_PAUSED, 0L, 1f)
+            .setState(
+                if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
+                0L,
+                1f,
+            )
             .build()
 
     private fun buildNotification(): Notification {
@@ -347,6 +374,7 @@ class MediaRemoteService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setStyle(
                 androidx.media.app.NotificationCompat.MediaStyle()
                     .setMediaSession(session.sessionToken),
@@ -356,7 +384,9 @@ class MediaRemoteService : Service() {
     }
 
     private fun createChannel() {
-        val channel = NotificationChannel(CHANNEL_ID, "Media remote", NotificationManager.IMPORTANCE_LOW)
+        val channel = NotificationChannel(CHANNEL_ID, "Media remote", NotificationManager.IMPORTANCE_LOW).apply {
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
         notificationManager.createNotificationChannel(channel)
     }
 
