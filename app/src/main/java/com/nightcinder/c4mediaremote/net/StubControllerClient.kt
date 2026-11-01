@@ -32,7 +32,17 @@ class StubControllerClient(
     override suspend fun status(): Result<ControllerStatus> {
         Log.i(TAG, "STUB GET $baseUrl/v1/status")
         return Result.success(
-            ControllerStatus(ok = true, version = "stub", activeRoom = "", nowPlaying = "unknown", lockRoom = ""),
+            ControllerStatus(
+                ok = true,
+                version = "stub",
+                activeRoom = "",
+                nowPlaying = "unknown",
+                lockRoom = "",
+                volume = null,
+                muted = null,
+                power = null,
+                source = null,
+            ),
         )
     }
 

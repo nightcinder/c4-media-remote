@@ -138,8 +138,14 @@ fun SettingsScreen(repo: SettingsRepository, onStartSession: () -> Unit) {
                     )
                     testResult = client.status().fold(
                         onSuccess = { s ->
-                            "Connected. Version ${s.version}, active room " +
-                                s.activeRoom.ifBlank { "unknown" }
+                            buildString {
+                                append("Connected. Version ${s.version}, active room ")
+                                append(s.activeRoom.ifBlank { "unknown" })
+                                s.volume?.let { append(", volume $it") }
+                                s.muted?.let { append(", ${if (it) "muted" else "unmuted"}") }
+                                s.power?.let { if (!it) append(", powered off") }
+                                s.source?.let { append(", source $it") }
+                            }
                         },
                         onFailure = { e -> "Failed: ${e.message ?: e.javaClass.simpleName}" },
                     )

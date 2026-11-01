@@ -9,6 +9,12 @@ data class ControllerStatus(
     val activeRoom: String,
     val nowPlaying: String,
     val lockRoom: String,
+    /** 0-100 when the bridge reports it (driver 0.3.0+). */
+    val volume: Int? = null,
+    val muted: Boolean? = null,
+    val power: Boolean? = null,
+    /** Display name of the selected source, when the bridge reports one. */
+    val source: String? = null,
 )
 
 /**

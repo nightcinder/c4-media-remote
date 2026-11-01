@@ -52,6 +52,11 @@ class HttpControllerClient(
             activeRoom = json.optString("active_room", ""),
             nowPlaying = json.optString("now_playing", "unknown"),
             lockRoom = json.optString("lock_room", ""),
+            volume = if (json.has("volume") && !json.isNull("volume"))
+                json.optInt("volume").coerceIn(0, 100) else null,
+            muted = if (json.has("muted") && !json.isNull("muted")) json.optBoolean("muted") else null,
+            power = if (json.has("power") && !json.isNull("power")) json.optBoolean("power") else null,
+            source = json.optString("source", "").ifBlank { null },
         )
     }
 

@@ -32,6 +32,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Foreground media service exposing a MediaSession with a remote VolumeProvider.
@@ -49,6 +50,11 @@ class MediaRemoteService : Service() {
     @Volatile private var roomLocked = false
     @Volatile private var volumeLevel = 50
     @Volatile private var activeRoomName = ""
+    @Volatile private var sourceName: String? = null
+    @Volatile private var powerOn: Boolean? = null
+    @Volatile private var bridgeReportsVolume = false
+    /** Volume ops queued or being sent; while non-zero, polled volume does not overwrite the local value. */
+    private val pendingVolumeOps = AtomicInteger(0)
     @Volatile private var connectionError: String? = null
 
     private val volumeOps = Channel<VolumeOp>(Channel.UNLIMITED)
@@ -178,27 +184,36 @@ class MediaRemoteService : Service() {
                 }
                 val lastSet = batch.indexOfLast { it is VolumeOp.Set }
                 val toSend = if (lastSet >= 0) batch.subList(lastSet, batch.size) else batch
-                for (op in toSend) {
-                    val (name, result) = when (op) {
-                        VolumeOp.Up -> "volume_up" to guarded { buildClient().volumeUp() }
-                        VolumeOp.Down -> "volume_down" to guarded { buildClient().volumeDown() }
-                        is VolumeOp.Set -> "volume_set" to guarded { buildClient().volumeSet(op.level) }
+                try {
+                    for (op in toSend) {
+                        val (name, result) = when (op) {
+                            VolumeOp.Up -> "volume_up" to guarded { buildClient().volumeUp() }
+                            VolumeOp.Down -> "volume_down" to guarded { buildClient().volumeDown() }
+                            is VolumeOp.Set -> "volume_set" to guarded { buildClient().volumeSet(op.level) }
+                        }
+                        report(name, result)
+                        delay(MIN_VOLUME_INTERVAL_MS)
                     }
-                    report(name, result)
-                    delay(MIN_VOLUME_INTERVAL_MS)
+                } finally {
+                    // Sent or superseded: these ops are no longer pending.
+                    pendingVolumeOps.addAndGet(-batch.size)
                 }
             }
         }
     }
 
     private fun enqueueVolume(op: VolumeOp) {
+        // Optimistic local value so the system volume UI responds immediately.
+        // The next status poll replaces it with the bridge's value.
+        val step = if (bridgeReportsVolume) OPTIMISTIC_STEP else VOLUME_STEP_ESTIMATE
         val level = when (op) {
-            VolumeOp.Up -> (volumeLevel + VOLUME_STEP_ESTIMATE).coerceIn(0, 100)
-            VolumeOp.Down -> (volumeLevel - VOLUME_STEP_ESTIMATE).coerceIn(0, 100)
+            VolumeOp.Up -> (volumeLevel + step).coerceIn(0, 100)
+            VolumeOp.Down -> (volumeLevel - step).coerceIn(0, 100)
             is VolumeOp.Set -> op.level
         }
         volumeLevel = level
         volumeProvider.setCurrentVolume(level)
+        pendingVolumeOps.incrementAndGet()
         volumeOps.trySend(op)
     }
 
@@ -210,6 +225,18 @@ class MediaRemoteService : Service() {
                 result.onSuccess { status ->
                     connectionError = null
                     activeRoomName = status.activeRoom
+                    sourceName = status.source
+                    powerOn = status.power
+                    status.muted?.let { muted = it }
+                    bridgeReportsVolume = status.volume != null
+                    status.volume?.let { reported ->
+                        // Skip while our own volume ops are still queued or in flight,
+                        // otherwise the poll would snap the slider back.
+                        if (pendingVolumeOps.get() == 0) {
+                            volumeLevel = reported
+                            volumeProvider.setCurrentVolume(reported)
+                        }
+                    }
                     syncRoomFromBridge(status.activeRoom)
                     updateMetadata()
                 }.onFailure { e ->
@@ -256,15 +283,17 @@ class MediaRemoteService : Service() {
 
     private fun subtitle(): String {
         connectionError?.let { return "Controller unreachable: $it" }
+        if (powerOn == false) return "Room off"
         if (activeRoomName.isBlank()) return "Connected"
-        return if (roomLocked) "Room: $activeRoomName (locked)" else "Room: $activeRoomName"
+        val base = sourceName?.let { "Room: $activeRoomName - $it" } ?: "Room: $activeRoomName"
+        return if (roomLocked) "$base (locked)" else base
     }
 
     private fun updateMetadata() {
         session.setMetadata(
             MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, activeRoomName.ifBlank { "C4 Media Remote" })
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "Control4")
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, sourceName ?: "Control4")
                 .build(),
         )
     }
@@ -347,9 +376,11 @@ class MediaRemoteService : Service() {
         const val ACTION_CYCLE_ROOM = "cycle_room"
         const val ACTION_LOCK_ROOM = "lock_room"
 
-        const val STATUS_POLL_INTERVAL_MS = 5_000L
+        const val STATUS_POLL_INTERVAL_MS = 3_000L
         const val MIN_VOLUME_INTERVAL_MS = 200L
-        /** The bridge does not report volume, so the local value moves by this guess per step. */
+        /** Optimistic local nudge per volume key press while the bridge reports volume; corrected on the next poll. */
+        const val OPTIMISTIC_STEP = 2
+        /** Fallback local step, used only when status has no volume field. */
         const val VOLUME_STEP_ESTIMATE = 5
 
         /** Debug switch: route all calls to StubControllerClient (no network). Keep false for real use. */
