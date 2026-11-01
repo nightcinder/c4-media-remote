@@ -64,6 +64,10 @@ class MediaRemoteService : Service() {
     @Volatile private var connectionError: String? = null
     /** Last known play state; drives the MediaSession PlaybackState so the UI offers the right button. */
     @Volatile private var playing = true
+    /** true = ACTIVE (media card shown); false = IDLE (minimal notification, session hidden). Starts IDLE. */
+    @Volatile private var mediaActive = false
+    /** Consecutive status polls without now-playing data (debounce for the switch to IDLE). */
+    private var idleStreak = 0
 
     private val volumeOps = Channel<VolumeOp>(Channel.UNLIMITED)
 
@@ -136,7 +140,7 @@ class MediaRemoteService : Service() {
         super.onCreate()
         settings = SettingsRepository(this)
         notificationManager = getSystemService(NotificationManager::class.java)
-        createChannel()
+        createChannels()
         session = MediaSessionCompat(this, "C4MediaRemote").apply {
             setFlags(
                 MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
@@ -145,7 +149,8 @@ class MediaRemoteService : Service() {
             setPlaybackState(buildPlaybackState())
             setPlaybackToRemote(volumeProvider)
             setCallback(sessionCallback)
-            isActive = true
+            // Stays inactive (IDLE) until the first poll reports now-playing data.
+            isActive = false
         }
         updateMetadata()
         startVolumeWorker()
@@ -161,12 +166,7 @@ class MediaRemoteService : Service() {
             MediaButtonReceiver.handleIntent(session, intent)
         }
         // Always promote to foreground, including for media button intents, so the service never crashes.
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-        )
+        promoteToForeground()
         return START_STICKY
     }
 
@@ -260,6 +260,7 @@ class MediaRemoteService : Service() {
     private fun startStatusPolling() {
         scope.launch {
             while (isActive) {
+                val alwaysOn = runCatching { settings.settings.first().alwaysShowControls }.getOrDefault(false)
                 val result = guarded { buildClient().status() }
                 result.onSuccess { status ->
                     connectionError = null
@@ -282,15 +283,56 @@ class MediaRemoteService : Service() {
                         }
                     }
                     syncRoomFromBridge(status.activeRoom)
+                    onPollResult(
+                        hasNowPlaying = status.npTitle != null || status.npApp != null,
+                        alwaysOn = alwaysOn,
+                    )
                     updateMetadata()
                 }.onFailure { e ->
                     connectionError = e.message ?: e.javaClass.simpleName
                     Log.w(TAG, "status poll failed: ${e.javaClass.simpleName}")
+                    onPollResult(hasNowPlaying = false, alwaysOn = alwaysOn)
                 }
                 refreshNotification()
-                delay(STATUS_POLL_INTERVAL_MS)
+                delay(if (mediaActive) STATUS_POLL_INTERVAL_MS else IDLE_POLL_INTERVAL_MS)
             }
         }
+    }
+
+    /**
+     * Applies one poll result to the ACTIVE/IDLE state. Switching to ACTIVE is immediate;
+     * switching to IDLE happens only after IDLE_POLLS_BEFORE_HIDE consecutive idle polls.
+     */
+    private fun onPollResult(hasNowPlaying: Boolean, alwaysOn: Boolean) {
+        val wantActive = if (alwaysOn || hasNowPlaying) {
+            idleStreak = 0
+            true
+        } else {
+            idleStreak++
+            mediaActive && idleStreak < IDLE_POLLS_BEFORE_HIDE
+        }
+        if (wantActive != mediaActive) setMediaActive(wantActive)
+    }
+
+    private fun setMediaActive(active: Boolean) {
+        mediaActive = active
+        session.isActive = active
+        Log.i(TAG, if (active) "state: ACTIVE" else "state: IDLE")
+        try {
+            promoteToForeground()
+        } catch (e: Exception) {
+            Log.w(TAG, "startForeground on state change failed: ${e.javaClass.simpleName}")
+            refreshNotification()
+        }
+    }
+
+    private fun promoteToForeground() {
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            buildNotification(),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+        )
     }
 
     private suspend fun syncRoomFromBridge(name: String) {
@@ -405,7 +447,30 @@ class MediaRemoteService : Service() {
             )
             .build()
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(): Notification =
+        if (mediaActive) buildMediaNotification() else buildIdleNotification()
+
+    /** Minimal, silent, secret-visibility notification used while IDLE. Has no actions. */
+    private fun buildIdleNotification(): Notification {
+        val openApp = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(this, IDLE_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle("C4 Media Remote")
+            .setContentText("Idle - nothing playing")
+            .setContentIntent(openApp)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .build()
+    }
+
+    private fun buildMediaNotification(): Notification {
         val openApp = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
         )
@@ -454,11 +519,17 @@ class MediaRemoteService : Service() {
             MediaButtonReceiver.buildMediaButtonPendingIntent(this, action),
         )
 
-    private fun createChannel() {
+    private fun createChannels() {
         val channel = NotificationChannel(CHANNEL_ID, "Media remote", NotificationManager.IMPORTANCE_LOW).apply {
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
+        // Channel importance cannot change after creation, so IDLE gets its own channel.
+        val idleChannel = NotificationChannel(IDLE_CHANNEL_ID, "Media remote idle", NotificationManager.IMPORTANCE_MIN).apply {
+            lockscreenVisibility = Notification.VISIBILITY_SECRET
+            setShowBadge(false)
+        }
         notificationManager.createNotificationChannel(channel)
+        notificationManager.createNotificationChannel(idleChannel)
     }
 
     private sealed interface VolumeOp {
@@ -470,6 +541,7 @@ class MediaRemoteService : Service() {
     companion object {
         private const val TAG = "MediaRemoteService"
         private const val CHANNEL_ID = "media_remote"
+        private const val IDLE_CHANNEL_ID = "media_remote_idle"
         private const val NOTIFICATION_ID = 1
 
         const val ACTION_STOP = "com.nightcinder.c4mediaremote.action.STOP"
@@ -478,6 +550,10 @@ class MediaRemoteService : Service() {
         const val ACTION_LOCK_ROOM = "lock_room"
 
         const val STATUS_POLL_INTERVAL_MS = 3_000L
+        /** Poll interval while IDLE. */
+        const val IDLE_POLL_INTERVAL_MS = 10_000L
+        /** Consecutive idle polls required before switching from ACTIVE to IDLE. */
+        const val IDLE_POLLS_BEFORE_HIDE = 3
         const val MIN_VOLUME_INTERVAL_MS = 200L
         /** Optimistic local nudge per volume key press while the bridge reports volume; corrected on the next poll. */
         const val OPTIMISTIC_STEP = 2

@@ -45,6 +45,7 @@ fun SettingsScreen(repo: SettingsRepository, onStartSession: () -> Unit) {
     var token by remember { mutableStateOf("") }
     var room by remember { mutableStateOf(Room.UPSTAIRS) }
     var locked by remember { mutableStateOf(false) }
+    var alwaysOn by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf("") }
@@ -55,6 +56,7 @@ fun SettingsScreen(repo: SettingsRepository, onStartSession: () -> Unit) {
         port = s.port.toString()
         room = s.activeRoom
         locked = s.roomLocked
+        alwaysOn = s.alwaysShowControls
         token = repo.loadToken()
         loaded = true
     }
@@ -111,13 +113,19 @@ fun SettingsScreen(repo: SettingsRepository, onStartSession: () -> Unit) {
             Text("Lock room")
         }
 
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = alwaysOn, onCheckedChange = { alwaysOn = it })
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Always show controls")
+        }
+
         Button(
             enabled = loaded,
             onClick = {
                 scope.launch {
                     val parsedPort = port.toIntOrNull()?.takeIf { it in 1..65535 }
                         ?: AppSettings.DEFAULT_PORT
-                    repo.save(AppSettings(address.trim(), parsedPort, room, locked))
+                    repo.save(AppSettings(address.trim(), parsedPort, room, locked, alwaysOn))
                     repo.saveToken(token.trim())
                     message = "Saved"
                 }

@@ -28,6 +28,8 @@ data class AppSettings(
     val port: Int = DEFAULT_PORT,
     val activeRoom: Room = Room.UPSTAIRS,
     val roomLocked: Boolean = false,
+    /** When true the media card is always shown, even when nothing is playing. */
+    val alwaysShowControls: Boolean = false,
 ) {
     companion object {
         const val DEFAULT_PORT = 8765
@@ -50,6 +52,7 @@ class SettingsRepository(context: Context) {
     private val keyPort = intPreferencesKey("controller_port")
     private val keyRoom = stringPreferencesKey("active_room")
     private val keyLock = booleanPreferencesKey("room_locked")
+    private val keyAlwaysShow = booleanPreferencesKey("always_show_controls")
 
     val settings: Flow<AppSettings> = store.data.map { p ->
         AppSettings(
@@ -58,6 +61,7 @@ class SettingsRepository(context: Context) {
             activeRoom = p[keyRoom]?.let { name -> runCatching { Room.valueOf(name) }.getOrNull() }
                 ?: Room.UPSTAIRS,
             roomLocked = p[keyLock] ?: false,
+            alwaysShowControls = p[keyAlwaysShow] ?: false,
         )
     }
 
@@ -67,6 +71,7 @@ class SettingsRepository(context: Context) {
             p[keyPort] = settings.port
             p[keyRoom] = settings.activeRoom.name
             p[keyLock] = settings.roomLocked
+            p[keyAlwaysShow] = settings.alwaysShowControls
         }
     }
 
