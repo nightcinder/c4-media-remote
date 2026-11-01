@@ -17,6 +17,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.media.VolumeProviderCompat
+import androidx.media.session.MediaButtonReceiver
 import com.nightcinder.c4mediaremote.MainActivity
 import com.nightcinder.c4mediaremote.data.Room
 import com.nightcinder.c4mediaremote.data.SettingsRepository
@@ -145,6 +146,10 @@ class MediaRemoteService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
+            MediaButtonReceiver.handleIntent(session, intent)
+        }
+        // Always promote to foreground, including for media button intents, so the service never crashes.
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
@@ -188,6 +193,7 @@ class MediaRemoteService : Service() {
 
     private fun updatePlaybackState() {
         session.setPlaybackState(buildPlaybackState())
+        refreshNotification()
     }
 
     /**
@@ -366,6 +372,17 @@ class MediaRemoteService : Service() {
             Intent(this, MediaRemoteService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE,
         )
+        val prev = mediaAction(
+            android.R.drawable.ic_media_previous, "Previous", PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS,
+        )
+        val playPause = if (playing) {
+            mediaAction(android.R.drawable.ic_media_pause, "Pause", PlaybackStateCompat.ACTION_PAUSE)
+        } else {
+            mediaAction(android.R.drawable.ic_media_play, "Play", PlaybackStateCompat.ACTION_PLAY)
+        }
+        val next = mediaAction(
+            android.R.drawable.ic_media_next, "Next", PlaybackStateCompat.ACTION_SKIP_TO_NEXT,
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("C4 Media Remote")
@@ -377,11 +394,22 @@ class MediaRemoteService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setStyle(
                 androidx.media.app.NotificationCompat.MediaStyle()
-                    .setMediaSession(session.sessionToken),
+                    .setMediaSession(session.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2),
             )
+            .addAction(prev)
+            .addAction(playPause)
+            .addAction(next)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stop)
             .build()
     }
+
+    private fun mediaAction(icon: Int, title: String, action: Long): NotificationCompat.Action =
+        NotificationCompat.Action(
+            icon,
+            title,
+            MediaButtonReceiver.buildMediaButtonPendingIntent(this, action),
+        )
 
     private fun createChannel() {
         val channel = NotificationChannel(CHANNEL_ID, "Media remote", NotificationManager.IMPORTANCE_LOW).apply {
