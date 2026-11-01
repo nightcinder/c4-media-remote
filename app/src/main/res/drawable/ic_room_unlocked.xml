@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Open padlock, 24dp, solid white. Used for the "Lock room" action while the room is unlocked. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M8,11 L8,7 C8,4.79 9.79,3 12,3 C14.21,3 16,4.79 16,7 L16,8 L14,8 L14,7 C14,5.9 13.1,5 12,5 C10.9,5 10,5.9 10,7 L10,11 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M5,11 L19,11 L19,21 L5,21 Z" />
+</vector>

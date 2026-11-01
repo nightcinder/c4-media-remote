@@ -57,6 +57,11 @@ class HttpControllerClient(
             muted = if (json.has("muted") && !json.isNull("muted")) json.optBoolean("muted") else null,
             power = if (json.has("power") && !json.isNull("power")) json.optBoolean("power") else null,
             source = json.optString("source", "").ifBlank { null },
+            npTitle = json.optString("np_title", "").ifBlank { null },
+            npArtist = json.optString("np_artist", "").ifBlank { null },
+            npApp = json.optString("np_app", "").ifBlank { null },
+            npPlaying = if (json.has("np_playing") && !json.isNull("np_playing"))
+                json.optBoolean("np_playing") else null,
         )
     }
 

@@ -19,6 +19,7 @@ import androidx.core.app.ServiceCompat
 import androidx.media.VolumeProviderCompat
 import androidx.media.session.MediaButtonReceiver
 import com.nightcinder.c4mediaremote.MainActivity
+import com.nightcinder.c4mediaremote.R
 import com.nightcinder.c4mediaremote.data.Room
 import com.nightcinder.c4mediaremote.data.SettingsRepository
 import com.nightcinder.c4mediaremote.net.ControllerClient
@@ -52,6 +53,10 @@ class MediaRemoteService : Service() {
     @Volatile private var volumeLevel = 50
     @Volatile private var activeRoomName = ""
     @Volatile private var sourceName: String? = null
+    /** Now-playing data from the bridge; npTitle null means no fresh data, so the room-based fallback is used. */
+    @Volatile private var npTitle: String? = null
+    @Volatile private var npArtist: String? = null
+    @Volatile private var npApp: String? = null
     @Volatile private var powerOn: Boolean? = null
     @Volatile private var bridgeReportsVolume = false
     /** Volume ops queued or being sent; while non-zero, polled volume does not overwrite the local value. */
@@ -260,8 +265,13 @@ class MediaRemoteService : Service() {
                     connectionError = null
                     activeRoomName = status.activeRoom
                     sourceName = status.source
+                    npTitle = status.npTitle
+                    npArtist = status.npArtist
+                    npApp = status.npApp
                     powerOn = status.power
                     status.muted?.let { muted = it }
+                    // Bridge play state wins when reported; otherwise keep the locally tracked guess.
+                    status.npPlaying?.let { playing = it }
                     bridgeReportsVolume = status.volume != null
                     status.volume?.let { reported ->
                         // Skip while our own volume ops are still queued or in flight,
@@ -319,17 +329,32 @@ class MediaRemoteService : Service() {
         connectionError?.let { return "Controller unreachable: $it" }
         if (powerOn == false) return "Room off"
         if (activeRoomName.isBlank()) return "Connected"
-        val base = sourceName?.let { "Room: $activeRoomName - $it" } ?: "Room: $activeRoomName"
+        val base = if (npTitle != null) {
+            npApp?.let { "$activeRoomName - $it" } ?: activeRoomName
+        } else {
+            sourceName?.let { "Room: $activeRoomName - $it" } ?: "Room: $activeRoomName"
+        }
         return if (roomLocked) "$base (locked)" else base
     }
 
     private fun updateMetadata() {
-        session.setMetadata(
+        val title = npTitle
+        val metadata = if (title != null) {
+            MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                .putString(
+                    MediaMetadataCompat.METADATA_KEY_ARTIST,
+                    npArtist ?: npApp ?: sourceName ?: "Control4",
+                )
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, activeRoomName)
+                .build()
+        } else {
             MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, activeRoomName.ifBlank { "C4 Media Remote" })
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, sourceName ?: "Control4")
-                .build(),
-        )
+                .build()
+        }
+        session.setMetadata(metadata)
         updatePlaybackState()
     }
 
@@ -365,11 +390,11 @@ class MediaRemoteService : Service() {
             .addCustomAction(
                 if (roomLocked) {
                     PlaybackStateCompat.CustomAction.Builder(
-                        ACTION_LOCK_ROOM, "Unlock room", android.R.drawable.ic_lock_lock,
+                        ACTION_LOCK_ROOM, "Unlock room", android.R.drawable.ic_lock_idle_lock,
                     ).build()
                 } else {
                     PlaybackStateCompat.CustomAction.Builder(
-                        ACTION_LOCK_ROOM, "Lock room", android.R.drawable.ic_lock_idle_lock,
+                        ACTION_LOCK_ROOM, "Lock room", R.drawable.ic_room_unlocked,
                     ).build()
                 },
             )

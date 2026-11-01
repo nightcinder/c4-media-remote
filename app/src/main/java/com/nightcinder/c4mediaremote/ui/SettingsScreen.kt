@@ -145,6 +145,11 @@ fun SettingsScreen(repo: SettingsRepository, onStartSession: () -> Unit) {
                                 s.muted?.let { append(", ${if (it) "muted" else "unmuted"}") }
                                 s.power?.let { if (!it) append(", powered off") }
                                 s.source?.let { append(", source $it") }
+                                s.npTitle?.let { t ->
+                                    append("\nNow playing: $t")
+                                    s.npArtist?.let { append(" by $it") }
+                                    s.npApp?.let { append(" (${it})") }
+                                }
                             }
                         },
                         onFailure = { e -> "Failed: ${e.message ?: e.javaClass.simpleName}" },

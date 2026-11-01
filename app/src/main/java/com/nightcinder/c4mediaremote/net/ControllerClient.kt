@@ -15,6 +15,14 @@ data class ControllerStatus(
     val power: Boolean? = null,
     /** Display name of the selected source, when the bridge reports one. */
     val source: String? = null,
+    /** Now-playing title from the bridge (driver 0.4.0+); null when no fresh data. */
+    val npTitle: String? = null,
+    /** Now-playing artist from the bridge; null when absent. */
+    val npArtist: String? = null,
+    /** Now-playing app name from the bridge; null when absent. */
+    val npApp: String? = null,
+    /** Real play state from the bridge; null when the bridge does not report it. */
+    val npPlaying: Boolean? = null,
 )
 
 /**

@@ -42,6 +42,10 @@ class StubControllerClient(
                 muted = null,
                 power = null,
                 source = null,
+                npTitle = null,
+                npArtist = null,
+                npApp = null,
+                npPlaying = null,
             ),
         )
     }
