@@ -165,7 +165,7 @@ class MediaRemoteService : Service() {
             this,
             NOTIFICATION_ID,
             buildNotification(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
         return START_STICKY
     }
