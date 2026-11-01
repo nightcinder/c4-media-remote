@@ -4,9 +4,8 @@ import android.util.Log
 import com.nightcinder.c4mediaremote.data.Room
 
 /**
- * Stub: logs what would be sent and reports success. No network traffic.
- * The token is accepted so the real implementation can use the same constructor,
- * but it is never logged.
+ * Debug-only stub: logs what would be sent and reports success. No network traffic.
+ * Enabled by MediaRemoteService.USE_STUB_CONTROLLER. The token is never logged.
  */
 class StubControllerClient(
     private val baseUrl: String,
@@ -28,11 +27,13 @@ class StubControllerClient(
     override suspend fun volumeUp() = stub("volume_up")
     override suspend fun volumeDown() = stub("volume_down")
     override suspend fun volumeSet(level: Int) = stub("volume_set", "?level=${level.coerceIn(0, 100)}")
-    override suspend fun setActiveRoom(room: Room) = stub("set_active_room", "?room=${room.name.lowercase()}")
+    override suspend fun setActiveRoom(room: Room) = stub("set_active_room", "?room=${room.label}")
 
-    override suspend fun status(): Result<String> {
+    override suspend fun status(): Result<ControllerStatus> {
         Log.i(TAG, "STUB GET $baseUrl/v1/status")
-        return Result.success("stub: networking not implemented")
+        return Result.success(
+            ControllerStatus(ok = true, version = "stub", activeRoom = "", nowPlaying = "unknown", lockRoom = ""),
+        )
     }
 
     private companion object {

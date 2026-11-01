@@ -24,13 +24,14 @@ enum class Room(val label: String) {
 }
 
 data class AppSettings(
-    val address: String = "",
+    val address: String = DEFAULT_ADDRESS,
     val port: Int = DEFAULT_PORT,
     val activeRoom: Room = Room.UPSTAIRS,
     val roomLocked: Boolean = false,
 ) {
     companion object {
         const val DEFAULT_PORT = 8765
+        const val DEFAULT_ADDRESS = "172.21.1.152"
     }
 }
 
@@ -52,7 +53,7 @@ class SettingsRepository(context: Context) {
 
     val settings: Flow<AppSettings> = store.data.map { p ->
         AppSettings(
-            address = p[keyAddress].orEmpty(),
+            address = p[keyAddress] ?: AppSettings.DEFAULT_ADDRESS,
             port = p[keyPort] ?: AppSettings.DEFAULT_PORT,
             activeRoom = p[keyRoom]?.let { name -> runCatching { Room.valueOf(name) }.getOrNull() }
                 ?: Room.UPSTAIRS,

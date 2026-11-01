@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import com.nightcinder.c4mediaremote.data.AppSettings
 import com.nightcinder.c4mediaremote.data.Room
 import com.nightcinder.c4mediaremote.data.SettingsRepository
+import com.nightcinder.c4mediaremote.net.HttpControllerClient
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -45,6 +46,8 @@ fun SettingsScreen(repo: SettingsRepository, onStartSession: () -> Unit) {
     var room by remember { mutableStateOf(Room.UPSTAIRS) }
     var locked by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
+    var testing by remember { mutableStateOf(false) }
+    var testResult by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         val s = repo.settings.first()
@@ -120,6 +123,32 @@ fun SettingsScreen(repo: SettingsRepository, onStartSession: () -> Unit) {
                 }
             },
         ) { Text("Save") }
+
+        Button(
+            enabled = loaded && !testing,
+            onClick = {
+                testing = true
+                testResult = "Testing..."
+                scope.launch {
+                    val parsedPort = port.toIntOrNull()?.takeIf { it in 1..65535 }
+                        ?: AppSettings.DEFAULT_PORT
+                    val client = HttpControllerClient(
+                        "http://${address.trim()}:$parsedPort",
+                        token.trim(),
+                    )
+                    testResult = client.status().fold(
+                        onSuccess = { s ->
+                            "Connected. Version ${s.version}, active room " +
+                                s.activeRoom.ifBlank { "unknown" }
+                        },
+                        onFailure = { e -> "Failed: ${e.message ?: e.javaClass.simpleName}" },
+                    )
+                    testing = false
+                }
+            },
+        ) { Text("Test connection") }
+
+        if (testResult.isNotEmpty()) Text(testResult)
 
         Button(onClick = onStartSession) { Text("Start media session") }
 

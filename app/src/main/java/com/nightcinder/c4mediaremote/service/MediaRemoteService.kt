@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Bundle
 import android.os.IBinder
+import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
@@ -20,26 +21,37 @@ import com.nightcinder.c4mediaremote.MainActivity
 import com.nightcinder.c4mediaremote.data.Room
 import com.nightcinder.c4mediaremote.data.SettingsRepository
 import com.nightcinder.c4mediaremote.net.ControllerClient
+import com.nightcinder.c4mediaremote.net.HttpControllerClient
 import com.nightcinder.c4mediaremote.net.StubControllerClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
  * Foreground media service exposing a MediaSession with a remote VolumeProvider.
- * Every command is a stub that logs via StubControllerClient; nothing hits the network yet.
+ * Transport and custom actions call the Media Remote Bridge; status is polled to
+ * drive the notification subtitle and the MediaSession metadata.
  */
 class MediaRemoteService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var settings: SettingsRepository
     private lateinit var session: MediaSessionCompat
+    private lateinit var notificationManager: NotificationManager
 
-    @Volatile
-    private var muted = false
+    @Volatile private var muted = false
+    @Volatile private var roomLocked = false
+    @Volatile private var volumeLevel = 50
+    @Volatile private var activeRoomName = ""
+    @Volatile private var connectionError: String? = null
+
+    private val volumeOps = Channel<VolumeOp>(Channel.UNLIMITED)
 
     private val volumeProvider = object : VolumeProviderCompat(
         VolumeProviderCompat.VOLUME_CONTROL_ABSOLUTE,
@@ -48,13 +60,13 @@ class MediaRemoteService : Service() {
     ) {
         override fun onAdjustVolume(direction: Int) {
             when {
-                direction > 0 -> dispatch("volume_up") { it.volumeUp() }
-                direction < 0 -> dispatch("volume_down") { it.volumeDown() }
+                direction > 0 -> enqueueVolume(VolumeOp.Up)
+                direction < 0 -> enqueueVolume(VolumeOp.Down)
             }
         }
 
         override fun onSetVolumeTo(volume: Int) {
-            dispatch("volume_set") { it.volumeSet(volume) }
+            enqueueVolume(VolumeOp.Set(volume.coerceIn(0, 100)))
         }
     }
 
@@ -66,24 +78,34 @@ class MediaRemoteService : Service() {
 
         override fun onCustomAction(action: String?, extras: Bundle?) {
             when (action) {
-                ACTION_MUTE_TOGGLE -> {
+                ACTION_MUTE_TOGGLE -> scope.launch {
                     val toMute = !muted
-                    muted = toMute
-                    dispatch("mute_toggle") { c -> if (toMute) c.mute() else c.unmute() }
+                    val result = guarded {
+                        val c = buildClient()
+                        if (toMute) c.mute() else c.unmute()
+                    }
+                    result.onSuccess { muted = toMute }
+                    report(if (toMute) "mute" else "unmute", result)
                 }
                 ACTION_CYCLE_ROOM -> scope.launch {
                     val current = settings.settings.first()
                     if (current.roomLocked) {
-                        Log.i(TAG, "STUB cycle_room ignored: room is locked")
+                        Log.i(TAG, "cycle_room ignored: room is locked")
                         return@launch
                     }
                     val next: Room = current.activeRoom.next()
-                    settings.setActiveRoom(next)
-                    buildClient().setActiveRoom(next)
+                    val result = guarded { buildClient().setActiveRoom(next) }
+                    result.onSuccess {
+                        settings.setActiveRoom(next)
+                        activeRoomName = next.label
+                        updateMetadata()
+                    }
+                    report("set_active_room", result)
                 }
                 ACTION_LOCK_ROOM -> scope.launch {
                     settings.toggleRoomLock()
-                    Log.i(TAG, "STUB lock_room toggled")
+                    roomLocked = settings.settings.first().roomLocked
+                    refreshNotification()
                 }
                 else -> Log.w(TAG, "Unknown custom action: $action")
             }
@@ -93,6 +115,7 @@ class MediaRemoteService : Service() {
     override fun onCreate() {
         super.onCreate()
         settings = SettingsRepository(this)
+        notificationManager = getSystemService(NotificationManager::class.java)
         createChannel()
         session = MediaSessionCompat(this, "C4MediaRemote").apply {
             setFlags(
@@ -104,6 +127,9 @@ class MediaRemoteService : Service() {
             setCallback(sessionCallback)
             isActive = true
         }
+        updateMetadata()
+        startVolumeWorker()
+        startStatusPolling()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -123,24 +149,128 @@ class MediaRemoteService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        scope.cancel()
         session.isActive = false
         session.release()
-        scope.cancel()
         super.onDestroy()
     }
 
-    private fun dispatch(name: String, block: suspend (ControllerClient) -> Result<*>) {
+    /** Runs one transport or room command in the background and reports the outcome. */
+    private fun dispatch(name: String, block: suspend (ControllerClient) -> Result<Unit>) {
         scope.launch {
-            block(buildClient()).onFailure { Log.w(TAG, "$name failed", it) }
+            report(name, guarded { block(buildClient()) })
         }
     }
 
+    /**
+     * Volume requests are debounced: the worker sends at most one request every
+     * MIN_VOLUME_INTERVAL_MS. When an absolute set is queued, earlier relative steps
+     * are dropped (the set supersedes them) but the set itself and anything after it
+     * are always sent, so the final value is never lost.
+     */
+    private fun startVolumeWorker() {
+        scope.launch {
+            while (isActive) {
+                val batch = mutableListOf(volumeOps.receive())
+                while (true) {
+                    val next = volumeOps.tryReceive().getOrNull() ?: break
+                    batch += next
+                }
+                val lastSet = batch.indexOfLast { it is VolumeOp.Set }
+                val toSend = if (lastSet >= 0) batch.subList(lastSet, batch.size) else batch
+                for (op in toSend) {
+                    val (name, result) = when (op) {
+                        VolumeOp.Up -> "volume_up" to guarded { buildClient().volumeUp() }
+                        VolumeOp.Down -> "volume_down" to guarded { buildClient().volumeDown() }
+                        is VolumeOp.Set -> "volume_set" to guarded { buildClient().volumeSet(op.level) }
+                    }
+                    report(name, result)
+                    delay(MIN_VOLUME_INTERVAL_MS)
+                }
+            }
+        }
+    }
+
+    private fun enqueueVolume(op: VolumeOp) {
+        val level = when (op) {
+            VolumeOp.Up -> (volumeLevel + VOLUME_STEP_ESTIMATE).coerceIn(0, 100)
+            VolumeOp.Down -> (volumeLevel - VOLUME_STEP_ESTIMATE).coerceIn(0, 100)
+            is VolumeOp.Set -> op.level
+        }
+        volumeLevel = level
+        volumeProvider.setCurrentVolume(level)
+        volumeOps.trySend(op)
+    }
+
+    /** Polls the bridge once on start and then every STATUS_POLL_INTERVAL_MS. */
+    private fun startStatusPolling() {
+        scope.launch {
+            while (isActive) {
+                val result = guarded { buildClient().status() }
+                result.onSuccess { status ->
+                    connectionError = null
+                    activeRoomName = status.activeRoom
+                    syncRoomFromBridge(status.activeRoom)
+                    updateMetadata()
+                }.onFailure { e ->
+                    connectionError = e.message ?: e.javaClass.simpleName
+                    Log.w(TAG, "status poll failed: ${e.javaClass.simpleName}")
+                }
+                refreshNotification()
+                delay(STATUS_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    private suspend fun syncRoomFromBridge(name: String) {
+        val room = Room.entries.firstOrNull { it.label.equals(name, ignoreCase = true) } ?: return
+        if (settings.settings.first().activeRoom != room) settings.setActiveRoom(room)
+    }
+
+    private fun report(name: String, result: Result<*>) {
+        result.onSuccess { connectionError = null }
+            .onFailure { e ->
+                connectionError = e.message ?: e.javaClass.simpleName
+                Log.w(TAG, "$name failed: ${e.javaClass.simpleName}")
+            }
+        refreshNotification()
+    }
+
+    private suspend fun <T> guarded(block: suspend () -> Result<T>): Result<T> =
+        try {
+            block()
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+
     private suspend fun buildClient(): ControllerClient {
         val s = settings.settings.first()
-        return StubControllerClient(
-            baseUrl = "http://${s.address}:${s.port}",
-            token = settings.loadToken(),
+        val baseUrl = "http://${s.address}:${s.port}"
+        val token = settings.loadToken()
+        return if (USE_STUB_CONTROLLER) {
+            StubControllerClient(baseUrl, token)
+        } else {
+            HttpControllerClient(baseUrl, token)
+        }
+    }
+
+    private fun subtitle(): String {
+        connectionError?.let { return "Controller unreachable: $it" }
+        if (activeRoomName.isBlank()) return "Connected"
+        return if (roomLocked) "Room: $activeRoomName (locked)" else "Room: $activeRoomName"
+    }
+
+    private fun updateMetadata() {
+        session.setMetadata(
+            MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, activeRoomName.ifBlank { "C4 Media Remote" })
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "Control4")
+                .build(),
         )
+    }
+
+    private fun refreshNotification() {
+        notificationManager.notify(NOTIFICATION_ID, buildNotification())
     }
 
     private fun buildPlaybackState(): PlaybackStateCompat =
@@ -183,7 +313,7 @@ class MediaRemoteService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("C4 Media Remote")
-            .setContentText("Session active (stubs only)")
+            .setContentText(subtitle())
             .setContentIntent(openApp)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -198,7 +328,13 @@ class MediaRemoteService : Service() {
 
     private fun createChannel() {
         val channel = NotificationChannel(CHANNEL_ID, "Media remote", NotificationManager.IMPORTANCE_LOW)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        notificationManager.createNotificationChannel(channel)
+    }
+
+    private sealed interface VolumeOp {
+        data object Up : VolumeOp
+        data object Down : VolumeOp
+        data class Set(val level: Int) : VolumeOp
     }
 
     companion object {
@@ -210,6 +346,14 @@ class MediaRemoteService : Service() {
         const val ACTION_MUTE_TOGGLE = "mute_toggle"
         const val ACTION_CYCLE_ROOM = "cycle_room"
         const val ACTION_LOCK_ROOM = "lock_room"
+
+        const val STATUS_POLL_INTERVAL_MS = 5_000L
+        const val MIN_VOLUME_INTERVAL_MS = 200L
+        /** The bridge does not report volume, so the local value moves by this guess per step. */
+        const val VOLUME_STEP_ESTIMATE = 5
+
+        /** Debug switch: route all calls to StubControllerClient (no network). Keep false for real use. */
+        const val USE_STUB_CONTROLLER = false
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, MediaRemoteService::class.java))
