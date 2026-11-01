@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+        TODO: The controller address is user-configured (a LAN IP), and network security
+        config cannot match IP ranges, so cleartext HTTP is permitted for all hosts for now.
+        Narrow this to specific hostnames, or move the bridge to HTTPS, before release.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
