@@ -89,11 +89,17 @@ class MediaRemoteService : Service() {
             when (action) {
                 ACTION_MUTE_TOGGLE -> scope.launch {
                     val toMute = !muted
+                    // Optimistic: flip and republish immediately so the icon reflects the new state.
+                    muted = toMute
+                    updatePlaybackState()
                     val result = guarded {
                         val c = buildClient()
                         if (toMute) c.mute() else c.unmute()
                     }
-                    result.onSuccess { muted = toMute }
+                    result.onFailure {
+                        muted = !toMute
+                        updatePlaybackState()
+                    }
                     report(if (toMute) "mute" else "unmute", result)
                 }
                 ACTION_CYCLE_ROOM -> scope.launch {
@@ -114,7 +120,7 @@ class MediaRemoteService : Service() {
                 ACTION_LOCK_ROOM -> scope.launch {
                     settings.toggleRoomLock()
                     roomLocked = settings.settings.first().roomLocked
-                    refreshNotification()
+                    updatePlaybackState()
                 }
                 else -> Log.w(TAG, "Unknown custom action: $action")
             }
@@ -341,9 +347,15 @@ class MediaRemoteService : Service() {
                     PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS,
             )
             .addCustomAction(
-                PlaybackStateCompat.CustomAction.Builder(
-                    ACTION_MUTE_TOGGLE, "Mute toggle", android.R.drawable.ic_lock_silent_mode,
-                ).build(),
+                if (muted) {
+                    PlaybackStateCompat.CustomAction.Builder(
+                        ACTION_MUTE_TOGGLE, "Unmute", android.R.drawable.ic_lock_silent_mode,
+                    ).build()
+                } else {
+                    PlaybackStateCompat.CustomAction.Builder(
+                        ACTION_MUTE_TOGGLE, "Mute", android.R.drawable.ic_lock_silent_mode_off,
+                    ).build()
+                },
             )
             .addCustomAction(
                 PlaybackStateCompat.CustomAction.Builder(
@@ -351,9 +363,15 @@ class MediaRemoteService : Service() {
                 ).build(),
             )
             .addCustomAction(
-                PlaybackStateCompat.CustomAction.Builder(
-                    ACTION_LOCK_ROOM, "Lock room", android.R.drawable.ic_lock_idle_lock,
-                ).build(),
+                if (roomLocked) {
+                    PlaybackStateCompat.CustomAction.Builder(
+                        ACTION_LOCK_ROOM, "Unlock room", android.R.drawable.ic_lock_lock,
+                    ).build()
+                } else {
+                    PlaybackStateCompat.CustomAction.Builder(
+                        ACTION_LOCK_ROOM, "Lock room", android.R.drawable.ic_lock_idle_lock,
+                    ).build()
+                },
             )
             .setState(
                 if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
