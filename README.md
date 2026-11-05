@@ -31,7 +31,7 @@ All calls need `Authorization: Bearer <token>`. Plain HTTP on the LAN, default p
 | Call | Purpose |
 |---|---|
 | `GET /v1/status` | active room, power, volume, mute, source, lock, now-playing fields |
-| `POST /v1/command/<name>` | `play`, `pause`, `toggle`, `next`, `prev`, `mute`, `unmute`, `volume_up`, `volume_down`, `volume_set?level=N`, `set_room?room=Upstairs` |
+| `POST /v1/command/<name>` | `play`, `pause`, `toggle`, `next`, `prev`, `mute`, `unmute`, `volume_up`, `volume_down`, `volume_set?level=N`, `set_active_room?room=Upstairs` |
 
 Newer status fields (volume 0.3.0+, now-playing 0.4.0+ of the driver) are optional;
 the app copes with a bridge that does not report them. Use a current driver build
